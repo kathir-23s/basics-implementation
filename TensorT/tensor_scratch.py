@@ -54,15 +54,39 @@ class TensorT:
         
         return result
 
-    def _apply_elementwise(self, a, b, op):
-        if not isinstance(a, list) and not isinstance(b, list):
-            return op(a,b)
-        elif not isinstance(a, list):  # broadcast scalar a
-            return [self._apply_elementwise(a, y, op) for y in b]
-        elif not isinstance(b, list):  # broadcast scalar b
-            return [self._apply_elementwise(x, b, op) for x in a]
-        
-        return [self._apply_elementwise(x,y,op) for x,y in zip(a,b)]
+    def _apply_elementwise(self, *args):
+        """
+        Apply a function elementwise across multiple tensors/scalars.
+        The last argument must be the function.
+        Supports broadcasting like the old 2-arg version.
+        """
+        *arrays, op = args  # separate operands and function
+
+        # Convert TensorT → raw data
+        arrays = [arr.data if isinstance(arr, TensorT) else arr for arr in arrays]
+
+        def recurse(*vals):
+            # Base case: all scalars
+            if all(not isinstance(v, list) for v in vals):
+                return op(*vals)
+
+            # Handle broadcasting: if some vals are scalars, expand them
+            max_len = max(len(v) if isinstance(v, list) else 1 for v in vals)
+
+            expanded = []
+            for v in vals:
+                if not isinstance(v, list):  # scalar → repeat
+                    expanded.append([v] * max_len)
+                elif len(v) == 1 and max_len > 1:  # length-1 list → broadcast
+                    expanded.append(v * max_len)
+                else:
+                    expanded.append(v)
+
+            # Recurse elementwise
+            return [recurse(*items) for items in zip(*expanded)]
+
+        return recurse(*arrays)
+
     
     def _broadcast_shape(self, shape1, shape2):
         '''
@@ -348,17 +372,69 @@ class TensorT:
             
         return TensorT(reshaped_tensor)
 
+    def tsum_axis(self, axis=1, keepdims=True):
+        """
+        Sum along specified axis
+        axis=0: sum along rows (column-wise sum) 
+        axis=1: sum along columns (row-wise sum)
+        """
+        if axis == 0:
+            # Sum along rows: (2,3) → (1,3) if keepdims else (3,)
+            result = [sum(self.data[i][j] for i in range(self.shape[0])) 
+                    for j in range(self.shape[1])]
+            return TensorT([result]) if keepdims else TensorT([result])
+        
+        elif axis == 1:
+            # Sum along columns: (2,3) → (2,1) if keepdims else (2,)  
+            if keepdims:
+                result = [[sum(row)] for row in self.data]
+            else:
+                result = [sum(row) for row in self.data]
+            return TensorT(result)
+
+    def tmaximum(self, scalar):
+        """Element-wise maximum with scalar (for ReLU)"""
+        result = self._apply_unary(self.data, lambda x: max(x, scalar))
+        return TensorT(result)
+    
+    def tclip(self, min_val, max_val):
+        """Clip values between min_val and max_val (for numerical stability)"""
+        result = self._apply_unary(self.data, lambda x: max(min_val, min(max_val, x)))
+        return TensorT(result)
+    
+    @classmethod
+    def from_numpy(cls, np_array):
+        """Convert numpy array to TensorT"""
+        if np_array.ndim == 1:
+            return cls([np_array.tolist()])
+        elif np_array.ndim == 2:
+            return cls(np_array.tolist())
+        else:
+            raise ValueError("Only 1D and 2D numpy arrays supported")
+
+    def to_numpy(self):
+        """Convert TensorT to numpy array"""
+        import numpy as np
+        return np.array(self.data)
+
+
 # MLP METHODS - BACKWARD PASS
-    # def zero_grad(self):
-    #     visited = set()
-    #     def _zero(tensor):
-    #         if id(tensor) in visited:
-    #             return
-    #         visited.add(id(tensor))
-    #         tensor.grad = None
-    #         for child in tensor.children:
-    #             _zero(child)
-    #     _zero(self)
+    def zero_grad(self):
+        """Zero out gradients for this tensor and all tensors in the computational graph"""
+        visited = set()
+        
+        def _zero(tensor):
+            if id(tensor) in visited:
+                return
+            visited.add(id(tensor))
+            tensor.grad = None
+            
+            # Traverse to parent tensors
+            for parent in tensor._parent:
+                if isinstance(parent, TensorT):
+                    _zero(parent)
+        
+        _zero(self)
 
     def backward(self, grad=None):
         if grad is None:
