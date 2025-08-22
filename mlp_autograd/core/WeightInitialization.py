@@ -1,10 +1,6 @@
-
 import random
 import math
-
-
-from ..tensor.tensor_scratch import TensorT
-
+from tensor.tensor_scratch import TensorT
 
 class WeightInitializer:
 
@@ -22,14 +18,8 @@ class WeightInitializer:
         Initializes all weights to a constant value.
         """
         # return np.full((output_dim, input_dim), value)
-        return TensorT.unit_tensor(value, (output_dim, input_dim))
+        return TensorT.const_tensor(value, (output_dim, input_dim))
 
-    # @staticmethod
-    # def random(input_dim, output_dim):
-    #     """
-    #     Initializes weights with a random uniform distribution.
-    #     """
-    #     return np.random.rand(output_dim, input_dim) * 2 - 1
     
     @staticmethod
     def random_uniform(input_dim, output_dim, low=-0.05, high=0.05):

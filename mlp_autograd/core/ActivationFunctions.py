@@ -1,6 +1,6 @@
 
 import math
-from ..tensor.tensor_scratch import TensorT
+from tensor.tensor_scratch import TensorT
 
 class ActivationFunction:
     
@@ -62,7 +62,7 @@ class ActivationFunction:
         
         # Subtract max for stability - manually implement broadcasting
         z_stable_data = []
-        for i, row in enumerate(z.data):
+        for row in z.data:
             stable_row = [x - z_max_per_col[j] for j, x in enumerate(row)]
             z_stable_data.append(stable_row)
         
@@ -74,7 +74,7 @@ class ActivationFunction:
         
         # Normalize - divide each element by its column sum
         result_data = []
-        for i, row in enumerate(exp_data):
+        for row in exp_data:
             normalized_row = [x / sum_exp_per_col[j] for j, x in enumerate(row)]
             result_data.append(normalized_row)
 
@@ -83,9 +83,16 @@ class ActivationFunction:
         def backward_fn(grad_op):
             # Softmax derivative: s * (δ - s) where δ is kronecker delta
             # For simplicity, using element-wise: s * (1 - s) * grad
-            s_data = result_data
-            grad_self = z._apply_elementwise(grad_op, s_data, lambda g, s_val: g * s_val * (1 - s_val))
-            return (grad_self,)  # ✅ Return tuple
+            s = result_data
+            C = len(s)
+            M = len(s[0]) if C else 0
+
+            grad_in = [[0.0 for _ in range(M)] for _ in range(C)]
+            for j in range(M):
+                dot_j = sum(grad_op[i][j] * s[i][j] for i in range(C))
+                for i in range(C):
+                    grad_in[i][j] = s[i][j] * (grad_op[i][j] - dot_j)
+            return (grad_in,)  # ✅ Return tuple
 
         out.backward_fn = backward_fn
         return out

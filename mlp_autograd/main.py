@@ -3,16 +3,11 @@ import numpy as np
 from sklearn.datasets import make_moons
 from sklearn.model_selection import train_test_split
 
-from mlp_autograd.models.mlp import MLP
-from mlp_autograd.tensor.tensor_scratch import TensorT
+from models.mlp import MLP
+from tensor.tensor_scratch import TensorT
 
 
-import os
-os.environ.setdefault("OMP_NUM_THREADS", "8")          # tune: set to your CPU cores
-os.environ.setdefault("MKL_NUM_THREADS", "8")
-os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "8")
-os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
-os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "1")
+
 
 # ------------------------------------------------------------------
 # 1. generate 2-D toy dataset
@@ -43,7 +38,7 @@ y_test  = TensorT(y_test_np.tolist())
 # ------------------------------------------------------------------
 mlp = MLP(
     input_size=2,
-    hidden_layers=[4, 4, 4, 4, 4],
+    hidden_layers=[4,4],
     output_size=1,
     weight_initialization='he_normal',
     activation_func='relu',
@@ -51,7 +46,7 @@ mlp = MLP(
     learning_rate=0.05
 )
 
-costs = mlp.train(X_train, y_train, epochs=4000, print_cost_every=250)
+costs = mlp.train(X_train, y_train, epochs=3000, print_cost_every=200)
 
 # ------------------------------------------------------------------
 # 4. evaluate
@@ -61,4 +56,4 @@ pred_labels = np.array(pred.data)        # to numpy
 y_true      = np.array(y_test.data)
 
 accuracy = np.mean(pred_labels == y_true) * 100.0
-print(f"Test Accuracy: {accuracy:.2f}%")
+print(f"Test Accuracy: {accuracy:.4f}%")

@@ -248,6 +248,16 @@ class TensorT:
         return cls(build(shape))
     
     @classmethod
+    def const_tensor(cls, unit: float, shape):
+        """Create a tensor filled with ones or zeros."""
+        unit = float(unit)  # ensure float type
+        def build(s):
+            if len(s) == 1:
+                return [unit] * s[0]
+            return [build(s[1:]) for _ in range(s[0])]
+        return cls(build(shape))
+    
+    @classmethod
     def random_tensor(cls, shape):
         '''Creating a tensor with random values'''
         m, n = shape
@@ -284,34 +294,93 @@ class TensorT:
         return out
 
     def block_matmul(self, other, block_size):
+        """
+        Blocked matrix multiply supporting rectangular shapes.
 
+        A: self.data, shape (m, k)
+        B: other.data, shape (k, n)
+        C: result,     shape (m, n)
+        """
         assert isinstance(self, TensorT) and isinstance(other, TensorT), "Both must be TensorT"
         assert len(self.shape) == 2 and len(other.shape) == 2, "Both tensors must be 2D matrices"
-        assert self.shape[0] == self.shape[1] == other.shape[0] == other.shape[1], \
-            "Block multiplication currently supports only square matrices of same dimension"
+        m, k = self.shape
+        k2, n = other.shape
+        if k != k2:
+            raise ValueError(f"Incompatible shapes: {self.shape} @ {other.shape}")
 
-        n = self.shape[0]  # matrix size
-        C = [[0.0 for _ in range(n)] for _ in range(n)]
+        # Output
+        C = [[0.0 for _ in range(n)] for _ in range(m)]
 
-        for ii in range(0, n, block_size):
+        # Blocked triple-loop: ii over rows of A/C, jj over cols of B/C, kk over shared dim
+        for ii in range(0, m, block_size):
+            iimax = min(ii + block_size, m)
             for jj in range(0, n, block_size):
-                for kk in range(0, n, block_size):
-                    for i in range(ii, min(ii + block_size, n)):
-                        for j in range(jj, min(jj + block_size, n)):
-                            temp_sum = C[i][j]
-                            for k in range(kk, min(kk + block_size, n)):
-                                temp_sum += self.data[i][k] * other.data[k][j]
-                            C[i][j] = temp_sum
+                jjmax = min(jj + block_size, n)
+                for kk in range(0, k, block_size):
+                    kkmax = min(kk + block_size, k)
+                    # Compute C[i,j] partial sums for this block
+                    for i in range(ii, iimax):
+                        Ai = self.data[i]
+                        Ci = C[i]
+                        for kk2 in range(kk, kkmax):
+                            aik = Ai[kk2]
+                            Bk = other.data[kk2]
+                            # accumulate aik * Bk[j] for j block
+                            for j in range(jj, jjmax):
+                                Ci[j] += aik * Bk[j]
 
         out = TensorT(C, _op='block_matmul', _parent=(self, other))
+
         def backward_fn(grad_out):
+            # grad_out has shape (m, n)
+            # dL/dA = grad_out @ B^T  → shape (m, k)
+            # dL/dB = A^T @ grad_out  → shape (k, n)
             grad_self = TensorT(grad_out).block_matmul(other.ttranspose(), block_size)
             grad_other = self.ttranspose().block_matmul(TensorT(grad_out), block_size)
             return grad_self.data, grad_other.data
-    
+
         out.backward_fn = backward_fn
         return out
-    
+
+    def tmatmul_fast(self, other):
+        """
+        Pure-Python cache-friendlier matmul using your own methods.
+        (m x k) @ (k x n) -> (m x n)
+        Strategy: use other.ttranspose() once; then inner loop is a dot over two flat rows.
+        """
+        assert isinstance(self, TensorT) and isinstance(other, TensorT), "otheroth must othere TensorT"
+        assert len(self.shape) == 2 and len(other.shape) == 2, "otheroth tensors must othere 2D"
+        m, k = self.shape
+        k2, n = other.shape
+        if k != k2:
+            raise ValueError(f"Incompatiotherle shapes: {self.shape} @ {other.shape}")
+
+        other_t = other.ttranspose()             # (n x k) — your method
+        C = [[0.0 for _ in range(n)] for _ in range(m)]
+
+        for i in range(m):
+            Ai = self.data[i]               # length k
+            Ci = C[i]
+            for j in range(n):
+                otherj = other_t.data[j]         # row j of other^T -> col j of other, length k
+                s = 0.0
+                for kk in range(k):
+                    s += Ai[kk] * otherj[kk]
+                Ci[j] = s
+
+        out = TensorT(C, _op='matmul_fast_pure', _parent=(self, other))
+
+        def backward_fn(grad_op):
+            # dA = G @ other^T ; dother = A^T @ G   (use same fast kernel + your transposes)
+            dA = TensorT.matmul_fast(TensorT(grad_op), other.ttranspose()).data
+            dB = TensorT.matmul_fast(self.ttranspose(), TensorT(grad_op)).data
+            return dA, dB
+
+        out.backward_fn = backward_fn
+        return out
+
+
+
     def ttranspose(self):
         '''Creating Transpose of the tensor
         
@@ -365,7 +434,7 @@ class TensorT:
             f"Incompatible Size for reshape. "
             f"New size {new_m, new_n} should have {m * n} elements"
         )
-        flat = self.flatten()
+        flat = self.tflatten()
 
         reshaped_tensor = [flat[i* new_n:(i+1) * new_n]
                            for i in range(new_m)]

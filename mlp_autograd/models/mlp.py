@@ -1,9 +1,9 @@
 
 import time
-from ..core.ActivationFunctions import ActivationFunction
-from ..core.WeightInitialization import WeightInitializer
-from ..core.LossFunctions import LossFunction
-from ..tensor.tensor_scratch import TensorT
+from core.ActivationFunctions import ActivationFunction
+from core.WeightInitialization import WeightInitializer
+from core.LossFunctions import LossFunction
+from tensor.tensor_scratch import TensorT
 
 class MLP:
     def __init__(self, input_size, hidden_layers, output_size, 
@@ -52,19 +52,11 @@ class MLP:
         
         for l in range(1, self.num_layers):
             W, b = self.weights[l-1], self.biases[l-1]
-            
-            # print(f"\nLayer {l}:")
-            # print(f"  W type: {type(W)}")
-            # print(f"  A type: {type(A)}")
-            # print(f"  isinstance(W, TensorT): {isinstance(W, TensorT)}")
-            # print(f"  isinstance(A, TensorT): {isinstance(A, TensorT)}")
-            
-            # This is where it fails
-            Z = W.tmatmul(A) + b
+
+            Z = W.block_matmul(A, 32) + b
             
             act = self.hidden_activation if l < self.num_layers - 1 else self.output_activation
             A = act(Z)
-            # print(f"  After activation A type: {type(A)}")
         
         return A
 
@@ -97,7 +89,7 @@ class MLP:
         costs = []
 
         for i in range(epochs):
-            # self.zero_grad()  # Reset gradients
+            self.zero_grad()  # Reset gradients
 
             AL = self.forward(X)
 
