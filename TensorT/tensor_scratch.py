@@ -133,82 +133,90 @@ class TensorT:
         return self.data[idx]
     
     def __add__(self, other):
-        result = self._elementwise_op(other, lambda x,y: x+y)
+        result = self._elementwise_op(other, lambda x, y: x + y)
         out = TensorT(result, _op='add', _parent=(self, other))
 
         def backward_fn(grad_op):
+            # grad_op is a nested list
             grad_self = grad_op
             grad_other = grad_op
 
+            # unbroadcast each to original shapes
+            grad_self = self._sum_to_shape(grad_self, self.shape)
+            if isinstance(other, TensorT):
+                grad_other = self._sum_to_shape(grad_other, other.shape)
             return grad_self, grad_other
-        
-        out.backward_fn = backward_fn        
+
+        out.backward_fn = backward_fn
         return out
 
     
     def __mul__(self, other):
-        result = self._elementwise_op(other, lambda x,y: x*y)
+        result = self._elementwise_op(other, lambda x, y: x * y)
         out = TensorT(result, _op='mul', _parent=(self, other))
 
         def backward_fn(grad_op):
-            
-            grad_self = self._apply_elementwise(grad_op,
-            other.data if isinstance(other, TensorT) else other,
-            lambda x, y: x * y)
-            grad_other = other._apply_elementwise(grad_op,
-            self.data if isinstance(self, TensorT) else self,
-            lambda x, y: x * y)
+            other_data = other.data if isinstance(other, TensorT) else other
+            self_data  = self.data
 
+            # d/dself = grad * other
+            grad_self = self._apply_elementwise(grad_op, other_data, lambda g, o: g * o)
+            grad_self = self._sum_to_shape(grad_self, self.shape)
+
+            # d/dother = grad * self
+            if isinstance(other, TensorT):
+                grad_other = self._apply_elementwise(grad_op, self_data, lambda g, s: g * s)
+                grad_other = self._sum_to_shape(grad_other, other.shape)
+            else:
+                grad_other = self._apply_elementwise(grad_op, self_data, lambda g, s: g * s)  # scalar case
             return grad_self, grad_other
 
         out.backward_fn = backward_fn
         return out
 
+
     def __sub__(self, other):
-        result =  self._elementwise_op(other, lambda x,y: x-y)
+        result = self._elementwise_op(other, lambda x, y: x - y)
         out = TensorT(result, _op='sub', _parent=(self, other))
 
         def backward_fn(grad_op):
-
-            grad_self = grad_op
-            grad_other = other._apply_unary(grad_op, lambda x: -x)
+            grad_self  = self._sum_to_shape(grad_op, self.shape)
+            if isinstance(other, TensorT):
+                neg_grad = self._apply_unary(grad_op, lambda x: -x)
+                grad_other = self._sum_to_shape(neg_grad, other.shape)
+            else:
+                grad_other = self._apply_unary(grad_op, lambda x: -x)
             return grad_self, grad_other
 
         out.backward_fn = backward_fn
         return out
+
     
     def __truediv__(self, other):
-    # Compute elementwise division
         result = self._elementwise_op(other, lambda x, y: x / y)
         out = TensorT(result, _op='div', _parent=(self, other))
 
         def backward_fn(grad_output):
-            # grad w.r.t self: grad_output / other
-            grad_self = self._apply_elementwise(
-                grad_output,
-                other.data if isinstance(other, TensorT) else other,
-                lambda x, y: x / y
-            )
-            # grad w.r.t other: -grad_output * self / (other^2)
-            grad_other = other._apply_elementwise(
-                grad_output,
-                self.data,
-                lambda go, s: -go * s
-            )
-            # Multiply grad_other by 1/(other^2)
-            grad_other = other._apply_elementwise(
-                grad_other,
-                self._apply_elementwise(
-                    other.data if isinstance(other, TensorT) else other,
-                    other.data if isinstance(other, TensorT) else other,
-                    lambda x, y: x * y
-                ),
-                lambda x, y: x / y
-            )
+            other_data = other.data if isinstance(other, TensorT) else other
+
+            # d/dself = grad / other
+            grad_self = self._apply_elementwise(grad_output, other_data, lambda g, o: g / o)
+            grad_self = self._sum_to_shape(grad_self, self.shape)
+
+            # d/dother = -grad * self / (other^2)
+            sq = self._apply_elementwise(other_data, other_data, lambda a, b: a * b)
+            num = self._apply_elementwise(grad_output, self.data, lambda g, s: -g * s)
+            grad_other_raw = self._apply_elementwise(num, sq, lambda n, d: n / d)
+
+            if isinstance(other, TensorT):
+                grad_other = self._sum_to_shape(grad_other_raw, other.shape)
+            else:
+                grad_other = grad_other_raw  # scalar
             return grad_self, grad_other
 
         out.backward_fn = backward_fn
         return out
+
     
     def __neg__(self):
         return TensorT(self._apply_unary(self.data, lambda x: -x))
@@ -233,13 +241,48 @@ class TensorT:
         total_elements = self.shape[0] * self.shape[1]
         return self.tsum() / total_elements if total_elements > 0 else float('nan')
 
-    
+    def _sum_to_shape(self, grad, target_shape):
+        """
+        Reduce 'grad' (nested lists) down to 'target_shape' by summing
+        along the leading broadcasted axes and any axis with size>1 in grad
+        that is 1 in target.
+        Both grad and target are 2D shapes here.
+        """
+        gm, gn = len(grad), len(grad[0]) if grad else 0
+        tm, tn = target_shape
+
+        # sum over rows if tm == 1 and gm > 1
+        if tm == 1 and gm > 1:
+            col_sums = [sum(grad[i][j] for i in range(gm)) for j in range(gn)]
+            grad = [col_sums]
+            gm = 1
+
+        # sum over cols if tn == 1 and gn > 1
+        if tn == 1 and gn > 1:
+            row_sums = [[sum(row) ] for row in grad]  # each row → 1
+            grad = row_sums
+
+        return grad
+
+
+
+
 # DEFINING RANDOM TENSORS
     @classmethod
     def unit_tensor(cls, unit: float, shape):
         """Create a tensor filled with ones or zeros."""
         if unit not in (0, 1):
             raise ValueError("unit must be 0 or 1")
+        unit = float(unit)  # ensure float type
+        def build(s):
+            if len(s) == 1:
+                return [unit] * s[0]
+            return [build(s[1:]) for _ in range(s[0])]
+        return cls(build(shape))
+    
+    @classmethod
+    def const_tensor(cls, unit: float, shape):
+        """Create a tensor filled with ones or zeros."""
         unit = float(unit)  # ensure float type
         def build(s):
             if len(s) == 1:
@@ -284,34 +327,119 @@ class TensorT:
         return out
 
     def block_matmul(self, other, block_size):
+        """
+        Blocked matrix multiply supporting rectangular shapes.
 
+        A: self.data, shape (m, k)
+        B: other.data, shape (k, n)
+        C: result,     shape (m, n)
+        """
         assert isinstance(self, TensorT) and isinstance(other, TensorT), "Both must be TensorT"
         assert len(self.shape) == 2 and len(other.shape) == 2, "Both tensors must be 2D matrices"
-        assert self.shape[0] == self.shape[1] == other.shape[0] == other.shape[1], \
-            "Block multiplication currently supports only square matrices of same dimension"
+        m, k = self.shape
+        k2, n = other.shape
+        if k != k2:
+            raise ValueError(f"Incompatible shapes: {self.shape} @ {other.shape}")
 
-        n = self.shape[0]  # matrix size
-        C = [[0.0 for _ in range(n)] for _ in range(n)]
+        # Output
+        C = [[0.0 for _ in range(n)] for _ in range(m)]
 
-        for ii in range(0, n, block_size):
+        # Blocked triple-loop: ii over rows of A/C, jj over cols of B/C, kk over shared dim
+        for ii in range(0, m, block_size):
+            iimax = min(ii + block_size, m)
             for jj in range(0, n, block_size):
-                for kk in range(0, n, block_size):
-                    for i in range(ii, min(ii + block_size, n)):
-                        for j in range(jj, min(jj + block_size, n)):
-                            temp_sum = C[i][j]
-                            for k in range(kk, min(kk + block_size, n)):
-                                temp_sum += self.data[i][k] * other.data[k][j]
-                            C[i][j] = temp_sum
+                jjmax = min(jj + block_size, n)
+                for kk in range(0, k, block_size):
+                    kkmax = min(kk + block_size, k)
+                    # Compute C[i,j] partial sums for this block
+                    for i in range(ii, iimax):
+                        Ai = self.data[i]
+                        Ci = C[i]
+                        for kk2 in range(kk, kkmax):
+                            aik = Ai[kk2]
+                            Bk = other.data[kk2]
+                            # accumulate aik * Bk[j] for j block
+                            for j in range(jj, jjmax):
+                                Ci[j] += aik * Bk[j]
 
         out = TensorT(C, _op='block_matmul', _parent=(self, other))
+
         def backward_fn(grad_out):
+            # grad_out has shape (m, n)
+            # dL/dA = grad_out @ B^T  → shape (m, k)
+            # dL/dB = A^T @ grad_out  → shape (k, n)
             grad_self = TensorT(grad_out).block_matmul(other.ttranspose(), block_size)
             grad_other = self.ttranspose().block_matmul(TensorT(grad_out), block_size)
             return grad_self.data, grad_other.data
-    
+
         out.backward_fn = backward_fn
         return out
-    
+
+    # tensor_scratch.py
+    def _transpose_2d(self, M):
+        if not M: return []
+        m, n = len(M), len(M[0])
+        T = [[0.0]*m for _ in range(n)]
+        for i in range(m):
+            Mi = M[i]
+            for j in range(n):
+                T[j][i] = Mi[j]
+        return T
+# tensor_scratch.py (inside class TensorT)
+    def tmatmul_fast(self, other):
+        assert isinstance(other, TensorT), "Not a tensor"
+        m, n = self.shape
+        n2, p = other.shape
+        assert n == n2, "Shape mismatch"
+
+        A = self.data
+        Bt = self._transpose_2d(other.data)   # Bt: (p, n)
+        C  = [[0.0]*p for _ in range(m)]
+
+        range_m = range(m); range_p = range(p); range_n = range(n)
+        for i in range_m:
+            Ai = A[i]
+            Ci = C[i]
+            for j in range_p:
+                Btj = Bt[j]
+                s = 0.0
+                # tight inner loop
+                for k in range_n:
+                    s += Ai[k] * Btj[k]
+                Ci[j] = s
+
+        out = TensorT(C, _op='matmul', _parent=(self, other))
+
+        def backward_fn(grad_op):
+            # dA = grad @ B^T
+            B_T = self._transpose_2d(other.data)  # (n, p) -> (p, n) already have as Bt; use original for clarity
+            dA = [[0.0]*n for _ in range(m)]
+            for i in range(m):
+                for k in range(n):
+                    s = 0.0
+                    for j in range(p):
+                        s += grad_op[i][j] * other.data[k][j]
+                    dA[i][k] = s
+
+            # dB = A^T @ grad
+            A_T = self._transpose_2d(self.data)   # (n, m)
+            dB = [[0.0]*p for _ in range(n)]
+            for k in range(n):
+                for j in range(p):
+                    s = 0.0
+                    row = A_T[k]
+                    for i in range(m):
+                        s += row[i] * grad_op[i][j]
+                    dB[k][j] = s
+
+            return dA, dB
+
+        out.backward_fn = backward_fn
+        return out
+
+
+
+
     def ttranspose(self):
         '''Creating Transpose of the tensor
         
@@ -365,7 +493,7 @@ class TensorT:
             f"Incompatible Size for reshape. "
             f"New size {new_m, new_n} should have {m * n} elements"
         )
-        flat = self.flatten()
+        flat = self.tflatten()
 
         reshaped_tensor = [flat[i* new_n:(i+1) * new_n]
                            for i in range(new_m)]
@@ -437,6 +565,7 @@ class TensorT:
         _zero(self)
 
     def backward(self, grad=None):
+
         if grad is None:
             if self.shape == ():
                 grad = 1.0
@@ -454,10 +583,9 @@ class TensorT:
         parent_grads = self.backward_fn(grad)
         for parent, parent_grad in zip(self._parent, parent_grads):
             if isinstance(parent, TensorT):
-                # if parent.grad is None:
-                #     parent.grad = parent_grad
-                # else:
-                #     parent.grad = parent._apply_elementwise(parent.grad, parent_grad, lambda x, y: x + y)
                 parent.backward(grad=parent_grad)
             else:
                 raise ValueError("Parent must be a TensorT instance")
+            
+
+
