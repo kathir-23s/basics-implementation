@@ -164,3 +164,4 @@ cython_debug/
 
 
 MLP/__pycache__/
+*.pyc
